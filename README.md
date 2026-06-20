@@ -25,6 +25,10 @@ later runs/restarts don't re-download anything. Once it's up:
 - `GET /healthz` / `GET /readyz` — liveness / readiness.
 - `GET /` — a manual test page (type text, pick or register a voice, hear the result).
 
+Voices registered via `/v1/tts/register` are persisted to the `lvoice_data` named volume
+(`/data/spk2info.pt` inside the container), so they survive `docker compose down`/`up` —
+no need to re-register after a restart.
+
 ## API
 
 All synthesis endpoints return raw `audio/wav` bytes.
@@ -97,6 +101,7 @@ Environment variables (all optional, `LVOICE_` prefix):
 | `LVOICE_DEVICE` | `auto` | `auto` \| `cuda` \| `cpu`. |
 | `LVOICE_MAX_TEXT_LENGTH` | `2000` | Max characters per request. |
 | `LVOICE_MAX_CONCURRENT_REQUESTS` | `1` | Bounds concurrent inference calls (raise on a beefier GPU). |
+| `LVOICE_SPEAKER_STORE_PATH` | `data/spk2info.pt` | Where registered speakers are persisted. Set to a mounted volume path in production (`docker-compose.yml` already does this). |
 
 ## Local development (without Docker)
 

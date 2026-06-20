@@ -31,12 +31,33 @@ class CosyVoiceEngine(BaseTTSEngine):
         from cosyvoice.cli.cosyvoice import CosyVoice2
 
         self._model = CosyVoice2(settings.model_dir)
+        self._load_speaker_store()
 
     def register_speaker(self, speaker_id: str, prompt_text: str, prompt_wav_bytes: bytes) -> None:
         with self._prompt_wav_path(prompt_wav_bytes) as path:
             ok = self._model.add_zero_shot_spk(prompt_text, path, speaker_id)
         if not ok:
             raise RuntimeError(f"Failed to register speaker '{speaker_id}'")
+        self._save_speaker_store()
+
+    def _load_speaker_store(self) -> None:
+        """Restore previously registered speakers (see register_speaker) so they
+        survive a container restart, e.g. from a mounted volume."""
+        if not os.path.exists(settings.speaker_store_path):
+            return
+        import torch
+
+        # weights_only=False: this is our own trusted file (a dict of tensors), not
+        # an untrusted download.
+        self._model.frontend.spk2info.update(
+            torch.load(settings.speaker_store_path, weights_only=False)
+        )
+
+    def _save_speaker_store(self) -> None:
+        import torch
+
+        os.makedirs(os.path.dirname(settings.speaker_store_path) or ".", exist_ok=True)
+        torch.save(self._model.frontend.spk2info, settings.speaker_store_path)
 
     def synthesize(self, text: str, speaker_id: str, speed: float = 1.0) -> np.ndarray:
         if speaker_id not in self.list_voices():

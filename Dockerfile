@@ -29,14 +29,16 @@ COPY pyproject.toml uv.lock ./
 COPY third_party ./third_party
 RUN uv sync --frozen --no-dev --extra cosyvoice
 
-COPY app ./app
-
 # Bakes the model weights into the image (see PLAN.md: chosen over a runtime
 # download so the container is self-contained). --no-dev keeps `uv run` from
 # re-syncing the dev dependency group (ruff/pytest/httpx) into this layer.
+# Deliberately placed before `COPY app` so app code changes don't bust this
+# layer's cache and force a ~4.6GB re-download.
 RUN uv run --no-dev python -c "\
 from huggingface_hub import snapshot_download; \
 snapshot_download('${MODEL_REPO}', local_dir='${MODEL_DIR}')"
+
+COPY app ./app
 
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

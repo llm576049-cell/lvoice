@@ -11,6 +11,9 @@ class Settings(BaseSettings):
     max_text_length: int = 2000
     max_concurrent_requests: int = 1
     log_level: str = "info"
+    # Registered speakers (from /v1/tts/register) are persisted here so they survive
+    # a container restart. Point this at a mounted volume in production.
+    speaker_store_path: str = "data/spk2info.pt"
 
 
 settings = Settings()
