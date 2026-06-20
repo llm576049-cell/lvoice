@@ -1,136 +1,174 @@
-# CosyVoice HTTP API Wrapper
+# lvoice — Design
 
 ## Context
 
-The repo (`lvoice`) is currently empty (just a `LICENSE`). The goal is to build a Dockerized HTTP API that wraps [CosyVoice](https://github.com/FunAudioLLM/CosyVoice) (Alibaba's TTS model family) so other services can call TTS over HTTP instead of dealing with the Python/PyTorch model directly.
+`lvoice` is a Dockerized HTTP API wrapping [CosyVoice2](https://github.com/FunAudioLLM/CosyVoice)
+(Alibaba's zero-shot TTS model), built so other services can call TTS over HTTP instead of dealing
+with the Python/PyTorch model directly. This document was originally written as a forward-looking
+implementation plan before any code existed; it now describes the architecture as actually shipped.
+For user-facing usage (endpoints, env vars, local dev), see [README.md](README.md) — this file is
+the "why it's built this way" companion.
 
-Decisions already made with the user:
+## Decisions
+
 - **Stack**: Python + FastAPI, importing CosyVoice in-process (no IPC hop).
-- **Hardware**: support both GPU (CUDA) and CPU, auto-detected at runtime.
-- **Feature scope**: full CosyVoice surface — basic TTS, zero-shot voice cloning, cross-lingual synthesis, instruct/emotion control.
-- **Model weights**: baked into the Docker image at build time (self-contained image, no first-run download).
-- **Chinese support**: confirmed — CosyVoice natively supports Mandarin/Cantonese (plus English/Japanese/Korean and cross-lingual); pin a checkpoint with Chinese capability (e.g. `CosyVoice2-0.5B` or `CosyVoice-300M`).
-- **Tooling**: package management via `uv` (`pyproject.toml` + `uv.lock`, no `requirements.txt`), code formatting/linting via `ruff`.
-- **Manual test page**: a simple static webpage to type text, hit the API, and play back the resulting audio in-browser, for quick manual sanity checks.
-- **Engine extensibility**: add a thin `BaseTTSEngine` abstraction now so other TTS backends (Coqui, Piper, Edge-TTS, etc.) can be plugged in later without touching the API/router layer; CosyVoice is the only concrete implementation for now.
+- **Hardware**: supports both GPU (CUDA) and CPU, auto-detected at runtime via `LVOICE_DEVICE=auto`.
+- **Feature scope**: full CosyVoice2 surface — zero-shot cloning, registered/reusable voices,
+  cross-lingual synthesis, instruct/emotion control.
+- **Model weights**: baked into the Docker image at build time (self-contained image, no
+  first-run download).
+- **Tooling**: `uv` for package management (`pyproject.toml` + `uv.lock`, no `requirements.txt`),
+  `ruff` for formatting/linting.
+- **Engine extensibility**: a thin `BaseTTSEngine` abstraction so other backends could be plugged
+  in later without touching the router/API layer. `CosyVoiceEngine` is the only implementation.
+- **Network independence**: the built image makes no network calls at runtime — verified with
+  `docker run --network none`. See "Offline resources" below.
+- **Speaker persistence**: registered voices survive a container restart via a mounted volume,
+  not just in-process memory.
+
+## Why CosyVoice2 specifically
+
+CosyVoice2 is zero-shot-only — unlike the older CosyVoice v1, it has no baked-in preset/SFT
+speakers. Every voice comes from a short reference clip. This shaped `BaseTTSEngine`: there's no
+`list of built-in speakers` concept, only `register_speaker` (clone + remember) and one-shot
+`clone`/`cross_lingual`/`instruct` calls.
 
 ## Project Layout
 
 ```
 lvoice/
 ├── Dockerfile
-├── docker-compose.yml
-├── pyproject.toml         # deps + ruff config, managed with uv
+├── docker-compose.yml       # CPU-only by default
+├── docker-compose.gpu.yml   # GPU overlay: -f docker-compose.yml -f docker-compose.gpu.yml
+├── pyproject.toml           # deps (base + "cosyvoice" extra) + ruff/pytest config
 ├── uv.lock
 ├── .dockerignore
-├── README.md
+├── README.md                # user-facing docs
+├── PLAN.md                  # this file
 ├── app/
-│   ├── __init__.py
-│   ├── main.py              # FastAPI app, startup/shutdown, router mounting
-│   ├── config.py            # env-driven settings (model dir, device, ports, limits)
-│   ├── deps.py               # singleton engine provider (lifespan-managed), picks impl via config.ENGINE
+│   ├── main.py               # FastAPI app, lifespan engine loading, router/static mounting
+│   ├── config.py             # env-driven Settings (LVOICE_* prefix)
+│   ├── deps.py                # engine singleton + require_engine (503 if not loaded) + inference semaphore
 │   ├── engines/
-│   │   ├── base.py            # BaseTTSEngine ABC: synthesize/clone/cross_lingual/instruct/list_voices
-│   │   └── cosyvoice.py        # CosyVoiceEngine(BaseTTSEngine): load, synth, clone, cross-lingual, instruct
-│   ├── schemas.py            # pydantic request/response models
-│   ├── audio.py              # tensor -> wav/mp3 encoding helpers
+│   │   ├── base.py             # BaseTTSEngine ABC
+│   │   └── cosyvoice.py         # CosyVoiceEngine: load, register/synthesize/clone/cross_lingual/instruct
+│   ├── schemas.py             # pydantic request/response models (JSON endpoints only)
+│   ├── audio.py               # stdlib-only float32 -> 16-bit PCM wav encoder
 │   ├── static/
-│   │   └── index.html        # manual test page: textarea + speaker picker + <audio> playback
+│   │   └── index.html          # manual test page (incl. in-browser mic recording)
 │   └── routers/
-│       ├── tts.py             # POST /v1/tts, /v1/tts/clone, /v1/tts/cross-lingual, /v1/tts/instruct
-│       ├── voices.py          # GET /v1/voices (built-in speakers), reference-voice upload/list
-│       └── health.py          # GET /healthz, /readyz
-└── tests/
-    ├── test_health.py
-    └── test_tts.py
+│       ├── tts.py               # POST /v1/tts, /register, /clone, /cross-lingual, /instruct
+│       ├── voices.py            # GET /v1/voices
+│       └── health.py            # GET /healthz, /readyz
+├── tests/                    # mocked-engine tests; run without the ML stack
+└── third_party/CosyVoice/    # git submodule, pinned commit, vendors CosyVoice + its own Matcha-TTS submodule
 ```
 
 ## Core Design
 
 ### 1. Engine abstraction (`app/engines/base.py`, `app/engines/cosyvoice.py`)
-- `BaseTTSEngine` ABC defines the contract every backend must implement:
-  - `synthesize(text, speaker_id, speed) -> np.ndarray` (preset/sft voices)
-  - `clone(text, prompt_wav_bytes, prompt_text) -> np.ndarray` (zero-shot cloning)
-  - `cross_lingual(text, prompt_wav_bytes) -> np.ndarray`
-  - `instruct(text, speaker_id, instruct_text) -> np.ndarray` (emotion/style control)
-  - `list_voices() -> list[str]`
-- `CosyVoiceEngine(BaseTTSEngine)` is the only concrete implementation for now, loaded once at process startup (FastAPI lifespan) holding the loaded CosyVoice model.
-- `app/deps.py` selects which engine class to instantiate based on `config.ENGINE` (default/only value: `cosyvoice`) — routers depend only on `BaseTTSEngine`, never import `CosyVoiceEngine` directly. This is what makes adding a second backend later a matter of writing `engines/<name>.py` + registering it in the factory, with no router/API changes.
-- Device selection: `torch.cuda.is_available()` → `cuda`, else `cpu`, overridable via `DEVICE` env var.
-- All inference calls run via `run_in_threadpool` (or a small worker queue) since CosyVoice inference is CPU/GPU-bound and synchronous — keeps the event loop responsive and lets us cap concurrency to avoid OOM on shared GPU.
+`BaseTTSEngine` defines: `register_speaker`, `synthesize`, `clone`, `cross_lingual`, `instruct`,
+`list_voices`, `sample_rate`. Routers depend only on this interface via `app.deps.require_engine`,
+never on `CosyVoiceEngine` directly — adding a second backend means writing
+`engines/<name>.py` and extending `build_engine()` (currently in `cosyvoice.py`), no router changes.
 
-### 2. API surface (`app/routers/tts.py`)
-- `POST /v1/tts` — `{text, speaker_id, speed?, format?}` → audio bytes (wav/mp3 via `audio.py`)
-- `POST /v1/tts/clone` — multipart: `text`, `prompt_text`, `prompt_audio` (file) → audio bytes
-- `POST /v1/tts/cross-lingual` — multipart: `text`, `prompt_audio` (file) → audio bytes
-- `POST /v1/tts/instruct` — `{text, speaker_id, instruct_text}` → audio bytes
-- Response: streamed audio (`StreamingResponse`, `audio/wav` or `audio/mpeg`) plus an optional `?return=base64` mode for JSON-only clients.
-- `GET /v1/voices` — lists built-in CosyVoice speaker IDs available in the loaded model.
-- `GET /healthz` — liveness (process up). `GET /readyz` — readiness (model loaded).
+`CosyVoiceEngine` is loaded once at process startup (FastAPI lifespan in `main.py`) and held as a
+module-level singleton in `deps.py`. Device selection (`cuda`/`cpu`/`auto`) is handled by setting
+`CUDA_VISIBLE_DEVICES=""` before CosyVoice2's constructor runs, since CosyVoice2 itself has no
+device parameter and always checks `torch.cuda.is_available()` internally.
 
-### 2b. Manual test page (`app/static/index.html`)
-- FastAPI mounts `app/static` via `StaticFiles` at `/` (or `/test`), serving a single self-contained HTML file (vanilla JS, no build step).
-- UI: a textarea for input text, a `<select>` populated from `GET /v1/voices` for speaker/mode choice, a "Speak" button, and an `<audio controls>` element.
-- On submit: `fetch('/v1/tts', {method:'POST', body: JSON.stringify({text, speaker_id})})` → read response as `blob()` → `URL.createObjectURL(blob)` → set as the `<audio>` `src` and autoplay.
-- Purely for manual sanity-checking during development/demos — not a production UI, no auth, no styling beyond basics.
+Prompt audio is written to a temp file rather than kept in memory as `BytesIO`: CosyVoice's
+frontend re-opens the `prompt_wav` path multiple times internally (once per target sample rate), so
+a stream gets exhausted after the first read — a path is required.
 
-### 3. Config (`app/config.py`)
-Env vars: `MODEL_DIR` (baked-in path, e.g. `/models/CosyVoice2-0.5B`), `MODEL_NAME`, `DEVICE` (`auto|cuda|cpu`), `MAX_TEXT_LENGTH`, `MAX_CONCURRENT_REQUESTS`, `LOG_LEVEL`.
+### 2. API surface (`app/routers/tts.py`, `app/routers/voices.py`)
+- `POST /v1/tts` (JSON) — synthesize with a previously registered `speaker_id`.
+- `POST /v1/tts/register` (multipart) — clone + remember a voice under a `speaker_id`.
+- `POST /v1/tts/clone` (multipart) — one-shot zero-shot cloning, no registration.
+- `POST /v1/tts/cross-lingual` (multipart) — speak text in another language using the cloned voice.
+- `POST /v1/tts/instruct` (multipart) — speak text following a style/emotion/accent instruction.
+- `GET /v1/voices` — list registered speaker ids.
+- `GET /healthz` / `GET /readyz` — liveness / readiness (`require_engine` dependency reports 503
+  instead of crashing if the engine hasn't finished loading).
 
-### 4. Concurrency / resource control
-- A bounded `asyncio.Semaphore` (or a small thread pool with fixed size) around engine calls to prevent unbounded concurrent GPU/CPU inference from OOMing the container. Size configurable via `MAX_CONCURRENT_REQUESTS` (default 1 for GPU, a few for CPU).
+All synthesis endpoints return raw `audio/wav` bytes (see `app/audio.py` — a stdlib-only
+16-bit-PCM encoder, deliberately not using `soundfile`, so the API/schema layer stays importable
+without the "cosyvoice" extra's heavy ML dependencies).
 
-### 5. Error handling
-- Validate text length, supported audio formats for uploaded prompt audio, and speaker_id existence → return 400 with a clear message.
-- Catch model inference exceptions → 500 with a generic message (don't leak internals), log full stack trace.
+### 3. Manual test page (`app/static/index.html`)
+FastAPI mounts `app/static` via `StaticFiles` at `/`. Single self-contained HTML file, vanilla JS,
+no build step. Covers all four inference modes via tabs, plus an in-browser microphone recorder for
+the registration flow: browsers record to webm/opus, which the API doesn't accept, so the page
+decodes the recording via the Web Audio API and re-encodes it client-side as 16-bit mono PCM wav
+before upload (no extra libraries).
+
+### 4. Config (`app/config.py`)
+Pydantic `Settings`, `LVOICE_` env prefix. See README's configuration table for the full list —
+notably `speaker_store_path` (persistence, below) and `offline_resources` (below).
+
+### 5. Speaker persistence
+CosyVoice2 keeps registered voices in `model.frontend.spk2info`, an in-memory dict — gone on
+restart by default. `CosyVoiceEngine` loads this dict from `LVOICE_SPEAKER_STORE_PATH` on startup
+and saves it (via `torch.save`/`torch.load`) after every `register_speaker` call.
+`docker-compose.yml` mounts a `lvoice_data` named volume at `/data` and points the env var there,
+so registered voices survive `docker compose down`/`up`. Verified end-to-end against a real
+container restart and a full `down`/`up` cycle.
+
+### 6. Offline resources
+CosyVoice's text-normalization fallback (`wetext`) calls
+`modelscope.snapshot_download("pengzhendong/wetext")` on every engine load with no local-cache
+check — it always tries to resolve the "master" revision over the network first, and hard-fails if
+unreachable, even when the files are already cached locally. `LVOICE_OFFLINE_RESOURCES=true` makes
+`CosyVoiceEngine` monkeypatch `modelscope.snapshot_download` to force `local_files_only=True`
+*before* `cosyvoice`/`wetext` get imported. The Dockerfile bakes the resource into the image at
+build time (replicating `frontend.py`'s exact `Normalizer()` calls) and sets this env var, so the
+built image needs zero network access at runtime — verified with `docker run --network none`.
+
+### 7. Concurrency / resource control
+A bounded `asyncio.Semaphore` (`LVOICE_MAX_CONCURRENT_REQUESTS`, default 1) around engine calls,
+guarded inside `run_in_threadpool` since CosyVoice inference is synchronous and CPU/GPU-bound. Keeps
+the event loop responsive and prevents unbounded concurrent inference from OOMing the container.
+
+### 8. Error handling
+- Text length and prompt-audio content-type validated → 400 with a clear message.
+- Unknown `speaker_id` → 400 (raised as `ValueError` in the engine, mapped to 400 in the router).
+- Other inference exceptions → 500 with a generic message (no internals leaked), full traceback logged.
+- Engine not yet loaded → 503 via `require_engine`, not a crash.
 
 ## Docker
 
-### Dockerfile (multi-stage)
-- Base: `nvidia/cuda:12.1.0-runtime-ubuntu22.04` (works for both GPU and CPU-only hosts — CUDA runtime libs are present but unused if no GPU is exposed) or a slimmer CPU-targeted alternate stage if image size matters later. Given "support both" was chosen, standardize on the CUDA runtime base so the same image runs on either.
-- Install Python 3.10+ and `uv` (`COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/` is the standard pattern), then `uv sync --frozen` against the committed `pyproject.toml`/`uv.lock` (torch, torchaudio matching CUDA version, CosyVoice + its deps — `WeTextProcessing`, `onnxruntime`, etc.). `ruff` is a dev-only dependency (not needed at runtime, but `uv sync` keeps it out of the final layer via `--no-dev` if we split groups).
-- Clone/vendor CosyVoice source (as a git submodule or pinned pip-installed wheel if available) into the image.
-- `RUN` step downloads/bakes the chosen CosyVoice checkpoint (e.g. via `modelscope` or `huggingface_hub` download) into `MODEL_DIR` at build time — this is the step that makes the image self-contained per the user's choice. Document the model variant pinned (e.g. `CosyVoice2-0.5B`) as a build arg so it's easy to bump.
-- `EXPOSE 8000`, `CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]`
+### Dockerfile
+- Base: `nvidia/cuda:12.1.0-runtime-ubuntu22.04` — same image runs on GPU or CPU hosts.
+- `uv` manages its own Python toolchain (`uv python install 3.10`); the base image doesn't need
+  system Python.
+- Layer order is deliberate: `uv sync` → bake model weights → bake wetext resources → `COPY app`.
+  The model/resource bakes are placed *before* `COPY app` so app-code-only changes don't bust their
+  cache and force multi-GB re-downloads on every rebuild (this was a real bug, fixed after noticing
+  rebuilds were re-downloading the model on unrelated code changes).
+- `LVOICE_OFFLINE_RESOURCES=true` and `LVOICE_MODEL_DIR` are baked in via `ENV`.
 
-### docker-compose.yml
-- Single service `lvoice`, port `8000:8000`.
-- GPU profile via `deploy.resources.reservations.devices` (Compose v2 GPU syntax) so `docker compose up` picks up GPU if `nvidia-container-toolkit` is installed and host has a GPU; otherwise falls back to CPU automatically inside the app via `DEVICE=auto`.
-- Healthcheck hitting `/healthz`.
+### docker-compose.yml + docker-compose.gpu.yml
+CPU-only by default; GPU support is a separate `docker-compose.gpu.yml` overlay
+(`-f docker-compose.yml -f docker-compose.gpu.yml`) rather than baked into the base file. A hard
+`deploy.resources.reservations.devices` block in the base compose file would make
+`docker compose up` fail outright on hosts without `nvidia-container-toolkit` — that would defeat
+the "support both" device handling this project chose. Base file also defines the `lvoice_data`
+volume and a `/healthz`-based healthcheck.
 
-## Verification Plan
-1. `docker build -t lvoice .` succeeds and produces a runnable image with model baked in.
-2. `docker compose up` (no GPU) → container starts, `/healthz` and `/readyz` return 200, `DEVICE` resolves to `cpu` in logs.
-3. `curl -X POST localhost:8000/v1/tts -d '{"text":"hello world","speaker_id":"<default>"}' -H 'Content-Type: application/json' --output out.wav` → produces playable audio.
-4. Repeat with `/v1/tts/clone` using a short reference wav to confirm voice cloning path works end-to-end.
-5. `GET /v1/voices` returns the expected list of built-in speakers.
-6. Open `http://localhost:8000/` in a browser, type Chinese and English text, pick a voice, click Speak, confirm audio plays back.
-7. If a GPU host is available, re-run with `docker compose --profile gpu up` (or `docker run --gpus all`) and confirm `DEVICE=cuda` in logs and faster inference.
-8. `pytest tests/` for unit-level schema/validation tests (mocking the engine) so CI doesn't need a GPU or the real model to run basic checks.
+## Verification (all done, not just planned)
 
-## Milestones
-
-**M1 — Project scaffold**
-- `uv init`, `pyproject.toml` (deps + `[tool.ruff]`), `config.py`, repo skeleton in place.
-- Deliverable: `uv sync` runs cleanly, empty FastAPI app boots locally.
-
-**M2 — Engine layer (CosyVoice, no Docker yet)**
-- `BaseTTSEngine` ABC + `CosyVoiceEngine` implementation, built against CosyVoice's real inference API (pin version/commit first).
-- Runs locally on CPU against a manually-downloaded checkpoint (not yet baked into an image).
-- Deliverable: a local script/test that calls `CosyVoiceEngine.synthesize(...)` and produces a `.wav` file.
-
-**M3 — HTTP API**
-- Schemas, routers (`/v1/tts`, `/v1/tts/clone`, `/v1/tts/cross-lingual`, `/v1/tts/instruct`, `/v1/voices`), health routes, concurrency guard, error handling.
-- Deliverable: `uvicorn app.main:app` locally + `curl` against all endpoints produces playable audio.
-
-**M4 — Manual test page**
-- Static `index.html` served by FastAPI for typing text and playing back audio in-browser.
-- Deliverable: open the page in a browser, synthesize Chinese + English text, hear it play.
-
-**M5 — Dockerization**
-- Dockerfile (`uv sync --frozen`, CosyVoice + checkpoint baked in), docker-compose with GPU profile.
-- Deliverable: `docker build` + `docker compose up` works end-to-end on CPU; GPU path verified if a GPU host is available.
-
-**M6 — Polish**
-- `ruff format`/`check` clean, `pytest tests/` (mocked-engine unit tests), README with usage examples.
-- Deliverable: repo is in a shareable, documented state.
+1. `docker build` succeeds; image is self-contained (model + wetext resources baked in).
+2. `docker compose up` (no GPU) → `/healthz`/`/readyz` 200, `DEVICE` resolves to `cpu`.
+3. All five synthesis-adjacent endpoints exercised over real HTTP against the real
+   CosyVoice2-0.5B checkpoint (`/v1/tts`, `/register`, `/clone`, `/cross-lingual`, `/instruct`,
+   `/voices`) — confirmed correct, playable audio each time.
+4. Registered a voice, ran `docker compose restart`, then a full `down`/`up` cycle — voice survived
+   both, synthesis with it still worked.
+5. `docker run --network none` — engine loads and `/v1/tts/clone` produces correct audio with zero
+   network calls in the logs.
+6. `pytest` (mocked engine, no ML stack) + `ruff format`/`check` clean, both run repeatedly across
+   every change.
+7. Test page served and its exact `fetch()` calls replicated via curl for every mode; could not
+   click through it in an actual browser — this sandbox has no working headless browser (Playwright
+   refuses to install on this OS, no chromium binary, no snapd) and no real microphone to test the
+   in-browser recorder against.

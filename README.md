@@ -23,7 +23,8 @@ The first build downloads the CosyVoice2-0.5B checkpoint (~4.6 GB) and bakes it 
 later runs/restarts don't re-download anything. Once it's up:
 
 - `GET /healthz` / `GET /readyz` — liveness / readiness.
-- `GET /` — a manual test page (type text, pick or register a voice, hear the result).
+- `GET /` — a manual test page: type text, pick or register a voice (upload a clip or record one
+  with your microphone), hear the result.
 
 Voices registered via `/v1/tts/register` are persisted to the `lvoice_data` named volume
 (`/data/spk2info.pt` inside the container), so they survive `docker compose down`/`up` —
@@ -47,8 +48,8 @@ curl -X POST localhost:8000/v1/tts/clone \
 
 ### `POST /v1/tts/register` (multipart) + `POST /v1/tts` (JSON)
 
-Register a voice once, then reuse it by `speaker_id` without re-uploading the reference clip
-(kept in memory for the life of the process).
+Register a voice once, then reuse it by `speaker_id` without re-uploading the reference clip.
+Persisted to disk (see `LVOICE_SPEAKER_STORE_PATH` below), so it survives a restart.
 
 ```sh
 curl -X POST localhost:8000/v1/tts/register \
@@ -126,4 +127,4 @@ LVOICE_MODEL_DIR=pretrained_models/CosyVoice2-0.5B LVOICE_DEVICE=cpu \
 extend `build_engine()` (currently in `app/engines/cosyvoice.py`) to dispatch to it, and set
 `LVOICE_ENGINE=<name>`.
 
-See [PLAN.md](PLAN.md) for the original design plan and milestone breakdown.
+See [PLAN.md](PLAN.md) for the architecture/design rationale (why things are built this way).
