@@ -73,6 +73,31 @@
         width: 100%;
         margin-top: 1rem;
       }
+      .hint {
+        font-size: 0.8rem;
+        color: #666;
+        margin-top: 0.1rem;
+      }
+      .record-row {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        margin-top: 0.6rem;
+      }
+      .record-row button {
+        padding: 0.4rem 0.8rem;
+        cursor: pointer;
+      }
+      #record-status {
+        font-size: 0.85rem;
+        color: #555;
+      }
+      #record-preview {
+        margin-top: 0.4rem;
+      }
+      #record-preview:not([src]) {
+        display: none;
+      }
     </style>
   </head>
   <body>
@@ -101,13 +126,22 @@
             <input type="text" name="reg_speaker_id" placeholder="e.g. alice" />
           </label>
           <label
-            >Reference text (what's said in the clip)
+            >Reference text (must match the clip word-for-word)
             <input type="text" name="reg_prompt_text" />
           </label>
+          <div class="hint">
+            Best results: a single natural sentence, 3–10s, clean recording, no
+            background noise — matches exactly what's said in the clip.
+          </div>
           <label
-            >Reference clip (wav)
+            >Reference clip (wav) — upload a file, or record one below
             <input type="file" name="reg_prompt_audio" accept="audio/wav" />
           </label>
+          <div class="record-row">
+            <button type="button" id="record-btn">🎙 Record reference clip</button>
+            <span id="record-status"></span>
+          </div>
+          <audio id="record-preview" controls></audio>
           <button type="button" id="register-btn">Register voice</button>
         </details>
       </fieldset>
@@ -204,12 +238,112 @@
         }
       }
 
+      // --- Microphone recording for the register flow -----------------------
+      // Browsers record to webm/ogg (Opus), but the API only accepts wav, so we
+      // decode the recording with the Web Audio API and re-encode it as 16-bit
+      // PCM wav entirely client-side (no extra libraries).
+      const recordBtn = document.getElementById("record-btn");
+      const recordStatus = document.getElementById("record-status");
+      const recordPreview = document.getElementById("record-preview");
+      let mediaRecorder = null;
+      let recordedChunks = [];
+      let recordedWavBlob = null;
+      let recordTimer = null;
+
+      function floatTo16BitPCM(view, offset, input) {
+        for (let i = 0; i < input.length; i++, offset += 2) {
+          const s = Math.max(-1, Math.min(1, input[i]));
+          view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+        }
+      }
+
+      function writeAsciiString(view, offset, str) {
+        for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+      }
+
+      function encodeMonoWav(samples, sampleRate) {
+        const buffer = new ArrayBuffer(44 + samples.length * 2);
+        const view = new DataView(buffer);
+        writeAsciiString(view, 0, "RIFF");
+        view.setUint32(4, 36 + samples.length * 2, true);
+        writeAsciiString(view, 8, "WAVE");
+        writeAsciiString(view, 12, "fmt ");
+        view.setUint32(16, 16, true);
+        view.setUint16(20, 1, true); // PCM
+        view.setUint16(22, 1, true); // mono
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, sampleRate * 2, true); // byte rate (mono, 16-bit)
+        view.setUint16(32, 2, true); // block align
+        view.setUint16(34, 16, true); // bits per sample
+        writeAsciiString(view, 36, "data");
+        view.setUint32(40, samples.length * 2, true);
+        floatTo16BitPCM(view, 44, samples);
+        return new Blob([view], { type: "audio/wav" });
+      }
+
+      function downmixToMono(audioBuffer) {
+        const mono = new Float32Array(audioBuffer.length);
+        for (let c = 0; c < audioBuffer.numberOfChannels; c++) {
+          const data = audioBuffer.getChannelData(c);
+          for (let i = 0; i < data.length; i++) mono[i] += data[i] / audioBuffer.numberOfChannels;
+        }
+        return mono;
+      }
+
+      async function reencodeAsWav(blob) {
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        try {
+          const audioBuffer = await audioCtx.decodeAudioData(await blob.arrayBuffer());
+          return encodeMonoWav(downmixToMono(audioBuffer), audioBuffer.sampleRate);
+        } finally {
+          audioCtx.close();
+        }
+      }
+
+      recordBtn.addEventListener("click", async () => {
+        if (mediaRecorder && mediaRecorder.state === "recording") {
+          mediaRecorder.stop();
+          return;
+        }
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          recordedChunks = [];
+          mediaRecorder = new MediaRecorder(stream);
+          mediaRecorder.addEventListener("dataavailable", (e) => recordedChunks.push(e.data));
+          mediaRecorder.addEventListener("stop", async () => {
+            stream.getTracks().forEach((t) => t.stop());
+            clearInterval(recordTimer);
+            recordBtn.textContent = "🎙 Record reference clip";
+            recordStatus.textContent = "Converting…";
+            try {
+              recordedWavBlob = await reencodeAsWav(
+                new Blob(recordedChunks, { type: mediaRecorder.mimeType })
+              );
+              recordPreview.src = URL.createObjectURL(recordedWavBlob);
+              recordStatus.textContent = "Recorded — will be used instead of the file upload.";
+            } catch (e) {
+              recordedWavBlob = null;
+              recordStatus.textContent = "Failed to process recording: " + e.message;
+            }
+          });
+          mediaRecorder.start();
+          const startedAt = Date.now();
+          recordBtn.textContent = "⏹ Stop recording";
+          recordStatus.textContent = "Recording… 0s";
+          recordTimer = setInterval(() => {
+            recordStatus.textContent = "Recording… " + Math.floor((Date.now() - startedAt) / 1000) + "s";
+          }, 200);
+        } catch (e) {
+          recordStatus.textContent = "Microphone access failed: " + e.message;
+        }
+      });
+
       document.getElementById("register-btn").addEventListener("click", async () => {
         const fd = new FormData(form);
         const body = new FormData();
         body.set("speaker_id", fd.get("reg_speaker_id"));
         body.set("prompt_text", fd.get("reg_prompt_text"));
-        body.set("prompt_audio", fd.get("reg_prompt_audio"));
+        body.set("prompt_audio", recordedWavBlob || fd.get("reg_prompt_audio"), "prompt.wav");
         setStatus("Registering voice…");
         try {
           const res = await fetch("/v1/tts/register", { method: "POST", body });
