@@ -70,3 +70,5 @@ extend-exclude = ["third_party"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+# B008: false positive for FastAPI's Depends()/File()/Form() default-argument idiom.
+ignore = ["B008"]
