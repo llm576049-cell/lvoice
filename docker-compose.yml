@@ -1,0 +1,17 @@
+# CPU-only by default. On a GPU host with nvidia-container-toolkit installed, run:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up
+# (A hard GPU device reservation in this base file would make `docker compose up`
+# fail outright on hosts without nvidia-container-toolkit, so it's kept separate.)
+services:
+  lvoice:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      LVOICE_DEVICE: auto
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
