@@ -102,6 +102,7 @@ Environment variables (all optional, `LVOICE_` prefix):
 | `LVOICE_MAX_TEXT_LENGTH` | `2000` | Max characters per request. |
 | `LVOICE_MAX_CONCURRENT_REQUESTS` | `1` | Bounds concurrent inference calls (raise on a beefier GPU). |
 | `LVOICE_SPEAKER_STORE_PATH` | `data/spk2info.pt` | Where registered speakers are persisted. Set to a mounted volume path in production (`docker-compose.yml` already does this). |
+| `LVOICE_OFFLINE_RESOURCES` | `false` | If `true`, forces CosyVoice's text-normalization fallback (wetext) to use only its pre-baked local cache instead of checking modelscope.cn on startup. The Docker image bakes that cache in and sets this to `true`, so the container runs with zero network access (verified with `docker run --network none`). |
 
 ## Local development (without Docker)
 

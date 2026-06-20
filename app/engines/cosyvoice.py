@@ -28,10 +28,36 @@ class CosyVoiceEngine(BaseTTSEngine):
         if settings.device == "cpu":
             os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
+        if settings.offline_resources:
+            self._force_modelscope_offline()
+
         from cosyvoice.cli.cosyvoice import CosyVoice2
 
         self._model = CosyVoice2(settings.model_dir)
         self._load_speaker_store()
+
+    @staticmethod
+    def _force_modelscope_offline() -> None:
+        """CosyVoice's text-normalization fallback (wetext) calls
+        `modelscope.snapshot_download("pengzhendong/wetext")` on every startup with no
+        local-cache check, which always makes a network call to resolve the "master"
+        revision — even though the files are already cached. That call hard-fails (no
+        fallback to cache) on a network-restricted host. The Docker image bakes the
+        resource into the image's modelscope cache at build time, so here we patch
+        snapshot_download to force `local_files_only=True` *before* wetext (or
+        anything else) imports it, making it read-only from that pre-baked cache.
+
+        Must run before `cosyvoice.cli.cosyvoice` is imported, since that import
+        eventually triggers `from modelscope import snapshot_download` inside wetext,
+        which binds a reference to whatever this module attribute is at that time.
+        """
+        import functools
+
+        import modelscope
+
+        modelscope.snapshot_download = functools.partial(
+            modelscope.snapshot_download, local_files_only=True
+        )
 
     def register_speaker(self, speaker_id: str, prompt_text: str, prompt_wav_bytes: bytes) -> None:
         with self._prompt_wav_path(prompt_wav_bytes) as path:

@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     # Registered speakers (from /v1/tts/register) are persisted here so they survive
     # a container restart. Point this at a mounted volume in production.
     speaker_store_path: str = "data/spk2info.pt"
+    # If true, force modelscope downloads (e.g. wetext's text-normalization resources)
+    # to use only the local cache, never hitting the network. The Docker image bakes
+    # that cache in at build time and sets this to true; local dev defaults to false
+    # so the first run can still fetch it automatically.
+    offline_resources: bool = False
 
 
 settings = Settings()

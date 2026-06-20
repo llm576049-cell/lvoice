@@ -8,6 +8,7 @@ ARG MODEL_DIR=/models/CosyVoice2-0.5B
 ENV PYTHONUNBUFFERED=1 \
     UV_PROJECT_ENVIRONMENT=/app/.venv \
     LVOICE_MODEL_DIR=${MODEL_DIR} \
+    LVOICE_OFFLINE_RESOURCES=true \
     PATH="/app/.venv/bin:$PATH"
 
 # build-essential: compiles pyworld's C extension during `uv sync`.
@@ -37,6 +38,17 @@ RUN uv sync --frozen --no-dev --extra cosyvoice
 RUN uv run --no-dev python -c "\
 from huggingface_hub import snapshot_download; \
 snapshot_download('${MODEL_REPO}', local_dir='${MODEL_DIR}')"
+
+# Bakes CosyVoice's text-normalization fallback resources (wetext) into the
+# modelscope cache, mirroring exactly what cosyvoice/cli/frontend.py loads. Without
+# this, the resource is fetched from modelscope.cn on first use at *runtime*, which
+# fails outright on a network-restricted host. LVOICE_OFFLINE_RESOURCES=true (set
+# above) then forces CosyVoiceEngine to read only from this pre-baked cache.
+RUN uv run --no-dev python -c "\
+from wetext import Normalizer as ZhNormalizer; \
+from wetext import Normalizer as EnNormalizer; \
+ZhNormalizer(remove_erhua=False); \
+EnNormalizer()"
 
 COPY app ./app
 
