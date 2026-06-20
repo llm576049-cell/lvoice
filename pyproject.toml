@@ -8,8 +8,46 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
-    "numpy>=1.26",
+    "numpy>=1.26,<2",
     "python-multipart>=0.0.12",
+]
+
+# Heavy ML stack needed by the CosyVoice engine (app/engines/cosyvoice.py).
+# Kept separate so the API/schema layer can be installed and tested (M3) without
+# pulling in torch etc. Trimmed from CosyVoice's own requirements.txt: dropped
+# deepspeed/tensorrt (GPU build tooling, not needed for inference) and gradio/grpc
+# (CosyVoice's own webui/server, unused here). x-transformers is only needed by
+# CosyVoice3's DiT flow decoder, not CosyVoice2, so still dropped; lightning is
+# kept because the vendored Matcha-TTS submodule imports it unconditionally.
+[project.optional-dependencies]
+cosyvoice = [
+    "torch==2.3.1",
+    "torchaudio==2.3.1",
+    "onnxruntime==1.18.0",
+    "transformers==4.51.3",
+    "omegaconf==2.3.0",
+    "scipy",
+    "HyperPyYAML==1.2.3",
+    "modelscope==1.20.0",
+    "openai-whisper==20231117",
+    "inflect==7.3.1",
+    "wetext==0.0.4",
+    "soundfile==0.12.1",
+    "conformer==0.3.2",
+    "diffusers==0.29.0",
+    "hydra-core==1.3.2",
+    "lightning==2.2.4",
+    "setuptools<81",  # lightning.fabric still does pkg_resources.declare_namespace at import time
+    # Pulled in transitively by the vendored Matcha-TTS submodule's matcha.utils
+    # package, which unconditionally imports its training-utility modules even
+    # though we only use it for inference.
+    "rich",
+    "gdown",
+    "matplotlib",
+    "wget",
+    "librosa==0.10.2",
+    "pyarrow==18.1.0",
+    "pyworld==0.3.4",
 ]
 
 [dependency-groups]
@@ -19,9 +57,16 @@ dev = [
     "httpx>=0.27",
 ]
 
+[tool.uv.extra-build-dependencies]
+openai-whisper = ["setuptools<81"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+extend-exclude = ["third_party"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

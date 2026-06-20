@@ -17,8 +17,8 @@ async def lifespan(app: FastAPI):
     try:
         deps.set_engine(build_engine())
         logger.info("Engine '%s' loaded", settings.engine)
-    except NotImplementedError:
-        logger.warning("Engine '%s' is not implemented yet; running without it", settings.engine)
+    except Exception:
+        logger.exception("Failed to load engine '%s'; running without it", settings.engine)
     yield
 
 
