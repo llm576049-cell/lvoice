@@ -2,9 +2,268 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>lvoice</title>
+    <title>lvoice — TTS test page</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 640px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        color: #222;
+      }
+      h1 {
+        font-size: 1.3rem;
+      }
+      fieldset {
+        margin-bottom: 1rem;
+        border: 1px solid #ccc;
+        border-radius: 6px;
+      }
+      label {
+        display: block;
+        margin-top: 0.6rem;
+        font-size: 0.9rem;
+      }
+      textarea,
+      input[type="text"],
+      input[type="number"],
+      select {
+        width: 100%;
+        box-sizing: border-box;
+        margin-top: 0.2rem;
+        font: inherit;
+        padding: 0.3rem;
+      }
+      textarea {
+        height: 4rem;
+      }
+      .mode-tabs {
+        display: flex;
+        gap: 0.4rem;
+        margin-bottom: 1rem;
+      }
+      .mode-tabs button {
+        flex: 1;
+        padding: 0.5rem;
+        cursor: pointer;
+      }
+      .mode-tabs button.active {
+        background: #222;
+        color: white;
+      }
+      .mode-panel {
+        display: none;
+      }
+      .mode-panel.active {
+        display: block;
+      }
+      button[type="submit"] {
+        margin-top: 1rem;
+        padding: 0.5rem 1.2rem;
+        cursor: pointer;
+      }
+      #status {
+        margin-top: 0.8rem;
+        font-size: 0.9rem;
+      }
+      #status.error {
+        color: #b00020;
+      }
+      audio {
+        width: 100%;
+        margin-top: 1rem;
+      }
+    </style>
   </head>
   <body>
-    <p>lvoice TTS test page — coming in milestone M4.</p>
+    <h1>lvoice — TTS test page</h1>
+    <p>Manual sanity check against the running lvoice API. Not a production UI.</p>
+
+    <div class="mode-tabs">
+      <button data-mode="synthesize" class="active">Use saved voice</button>
+      <button data-mode="clone">Clone</button>
+      <button data-mode="cross-lingual">Cross-lingual</button>
+      <button data-mode="instruct">Instruct</button>
+    </div>
+
+    <form id="form">
+      <fieldset class="mode-panel active" data-mode="synthesize">
+        <legend>Speak with a previously registered voice</legend>
+        <label
+          >Speaker
+          <select name="speaker_id" id="speaker-select"></select>
+        </label>
+
+        <details style="margin-top: 0.6rem">
+          <summary>Register a new voice from a reference clip</summary>
+          <label
+            >Speaker id
+            <input type="text" name="reg_speaker_id" placeholder="e.g. alice" />
+          </label>
+          <label
+            >Reference text (what's said in the clip)
+            <input type="text" name="reg_prompt_text" />
+          </label>
+          <label
+            >Reference clip (wav)
+            <input type="file" name="reg_prompt_audio" accept="audio/wav" />
+          </label>
+          <button type="button" id="register-btn">Register voice</button>
+        </details>
+      </fieldset>
+
+      <fieldset class="mode-panel" data-mode="clone">
+        <legend>Zero-shot clone</legend>
+        <label
+          >Reference text (what's said in the clip)
+          <input type="text" name="prompt_text" />
+        </label>
+        <label
+          >Reference clip (wav)
+          <input type="file" name="prompt_audio" accept="audio/wav" />
+        </label>
+      </fieldset>
+
+      <fieldset class="mode-panel" data-mode="cross-lingual">
+        <legend>Cross-lingual</legend>
+        <label
+          >Reference clip (wav)
+          <input type="file" name="prompt_audio" accept="audio/wav" />
+        </label>
+      </fieldset>
+
+      <fieldset class="mode-panel" data-mode="instruct">
+        <legend>Instruct (style / emotion / accent)</legend>
+        <label
+          >Instruction (e.g. "speak cheerfully", "用四川话说这句话")
+          <input type="text" name="instruct_text" />
+        </label>
+        <label
+          >Reference clip (wav)
+          <input type="file" name="prompt_audio" accept="audio/wav" />
+        </label>
+      </fieldset>
+
+      <label
+        >Text to speak
+        <textarea name="text" required></textarea>
+      </label>
+      <label style="max-width: 8rem"
+        >Speed
+        <input type="number" name="speed" value="1.0" min="0.1" max="3.0" step="0.1" />
+      </label>
+
+      <button type="submit">Speak</button>
+    </form>
+
+    <div id="status"></div>
+    <audio id="player" controls></audio>
+
+    <script>
+      const form = document.getElementById("form");
+      const statusEl = document.getElementById("status");
+      const player = document.getElementById("player");
+      const speakerSelect = document.getElementById("speaker-select");
+      let mode = "synthesize";
+
+      document.querySelectorAll(".mode-tabs button").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          mode = btn.dataset.mode;
+          document
+            .querySelectorAll(".mode-tabs button")
+            .forEach((b) => b.classList.toggle("active", b === btn));
+          document
+            .querySelectorAll(".mode-panel")
+            .forEach((p) => p.classList.toggle("active", p.dataset.mode === mode));
+        });
+      });
+
+      function setStatus(msg, isError) {
+        statusEl.textContent = msg;
+        statusEl.classList.toggle("error", !!isError);
+      }
+
+      async function refreshVoices() {
+        try {
+          const res = await fetch("/v1/voices");
+          const data = await res.json();
+          speakerSelect.innerHTML = "";
+          for (const voice of data.voices) {
+            const opt = document.createElement("option");
+            opt.value = voice;
+            opt.textContent = voice;
+            speakerSelect.appendChild(opt);
+          }
+          if (data.voices.length === 0) {
+            const opt = document.createElement("option");
+            opt.textContent = "(no voices registered yet)";
+            speakerSelect.appendChild(opt);
+          }
+        } catch (e) {
+          setStatus("Failed to load voices: " + e, true);
+        }
+      }
+
+      document.getElementById("register-btn").addEventListener("click", async () => {
+        const fd = new FormData(form);
+        const body = new FormData();
+        body.set("speaker_id", fd.get("reg_speaker_id"));
+        body.set("prompt_text", fd.get("reg_prompt_text"));
+        body.set("prompt_audio", fd.get("reg_prompt_audio"));
+        setStatus("Registering voice…");
+        try {
+          const res = await fetch("/v1/tts/register", { method: "POST", body });
+          if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+          setStatus("Voice registered.");
+          await refreshVoices();
+        } catch (e) {
+          setStatus("Registration failed: " + e.message, true);
+        }
+      });
+
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const fd = new FormData(form);
+        const text = fd.get("text");
+        const speed = fd.get("speed") || "1.0";
+        setStatus("Synthesizing…");
+        player.removeAttribute("src");
+
+        let url, opts;
+        if (mode === "synthesize") {
+          url = "/v1/tts";
+          opts = {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text, speaker_id: fd.get("speaker_id"), speed: Number(speed) }),
+          };
+        } else {
+          const body = new FormData();
+          body.set("text", text);
+          body.set("speed", speed);
+          body.set("prompt_audio", fd.get("prompt_audio"));
+          if (mode === "clone") body.set("prompt_text", fd.get("prompt_text"));
+          if (mode === "instruct") body.set("instruct_text", fd.get("instruct_text"));
+          url = "/v1/tts/" + mode;
+          opts = { method: "POST", body };
+        }
+
+        try {
+          const res = await fetch(url, opts);
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.detail || res.statusText);
+          }
+          const blob = await res.blob();
+          player.src = URL.createObjectURL(blob);
+          player.play();
+          setStatus("Done.");
+        } catch (err) {
+          setStatus("Request failed: " + err.message, true);
+        }
+      });
+
+      refreshVoices();
+    </script>
   </body>
 </html>
