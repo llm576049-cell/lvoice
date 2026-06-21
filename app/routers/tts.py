@@ -10,7 +10,7 @@ from app.schemas import SynthesizeRequest
 
 router = APIRouter(prefix="/v1/tts", tags=["tts"])
 
-_ALLOWED_AUDIO_TYPES = {"audio/wav", "audio/x-wav", "audio/wave"}
+_ALLOWED_AUDIO_TYPES = {"audio/wav", "audio/x-wav", "audio/wave", "audio/vnd.wave"}
 
 
 def _validate_text(text: str) -> None:
